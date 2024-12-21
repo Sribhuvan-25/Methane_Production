@@ -114,7 +114,30 @@ def main():
     df = assign_group(df)
 
     # Define target columns and grouping column
-    target_columns = ['ACE-km', 'H2-km']
+    # target_columns = ['ACE-km', 'H2-km']
+    # target_columns = ["Digester",
+    # "Source",
+    # "Type",
+    # "Waste",
+    # "Biomass",
+    # "Average-Total-ISD-Cells",
+    # "ACE-Xi",
+    # "ACE-km",
+    # "ACE-Ks",
+    # "H2-Xi",
+    # "H2-km",
+    # "H2-Ks"]
+    target_columns = [
+    "Average-Total-ISD-Cells", "ACE-Xi", "ACE-km", "ACE-Ks", "H2-Xi", "H2-km", "H2-Ks",
+    "Digester_BD", "Digester_BF", "Digester_CB", "Digester_CP", "Digester_FD", "Digester_GB",
+    "Digester_GP", "Digester_JB", "Digester_LP", "Digester_MA", "Digester_NB", "Digester_NS",
+    "Digester_PC", "Digester_PO", "Digester_SF", "Digester_SS", "Digester_SW", "Digester_WA",
+    "Digester_WP", "Digester_WR", "Source_I", "Source_M", "Source_P", "Type_CSTR", "Type_EFB",
+    "Type_EGSB", "Type_Lagoon", "Type_UASB", "Waste_BW", "Waste_Dairy", "Waste_FW", "Waste_HSI",
+    "Waste_MPW", "Waste_MS", "Waste_MS+Dairy", "Waste_MS+HSI", "Waste_PP", "Waste_PR",
+    "Waste_SDW", "Biomass_F", "Biomass_G"
+]
+
     group_column = 'Group'
 
     # Create metadata file
