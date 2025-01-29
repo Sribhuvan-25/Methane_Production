@@ -1,0 +1,56 @@
+# Initial Set up
+
+python <file name>
+
+# Convert TSV to HDF5-based BIOM v2.1.0
+biom convert \
+  -i feature-table.tsv \
+  -o feature-table.biom \
+  --table-type="OTU table" \
+  --to-hdf5
+
+# Validate BIOM
+biom validate-table -i feature-table.biom
+
+# Import into QIIME 2
+qiime tools import \
+  --input-path feature-table.biom \
+  --type 'FeatureTable[Frequency]' \
+  --input-format BIOMV210Format \
+  --output-path feature-table.qza
+
+
+# Run model
+qiime sample-classifier regress-samples \
+  --i-table feature-table.qza \
+  --m-metadata-file sample-metadata.tsv \
+  --m-metadata-column ACE-km \
+  --p-estimator LinearSVR \
+  --p-parameter-tuning \
+  --p-n-estimators 30 \
+  --p-step 0.1 \
+  --p-optimize-feature-selection \
+  --p-random-state 123 \
+  --p-cv 5 \
+  --output-dir regression-results-30-0.001
+
+qiime tools export \
+  --input-path regression-results-30-0.001/feature_importance.qza \
+  --output-path regression-results-30-0.001/feature_importance
+
+qiime sample-classifier regress-samples-ncv \
+  --i-table feature-table.qza \
+  --m-metadata-file sample-metadata.tsv \
+  --m-metadata-column ACE-km \
+  --p-estimator ExtraTreesRegressor \
+  --p-parameter-tuning \
+  --p-n-estimators 30 \
+  --p-random-state 123 \
+  --p-cv 5 \
+  --output-dir ncv-regression-results-30
+
+qiime sample-classifier scatterplot \
+  --i-predictions ncv-regression-results-30/predictions.qza \
+  --m-truth-file sample-metadata.tsv \
+  --m-truth-column ACE-km \
+  --o-visualization ncv-regression-results-30/scatter-fit.qzv

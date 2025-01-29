@@ -1,0 +1,175 @@
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from biom import Table
+import json
+
+# ----------------------------
+# FUNCTIONS
+# ----------------------------
+
+def load_cleaned_data(filepath):
+    # Load the preprocessed data
+    df = pd.read_csv(filepath)
+    print(f"Loaded data from {filepath} with shape {df.shape}")
+    
+    # Rename the first column to 'sample-id' if it isn't already named
+    if df.columns[0] != 'sample-id':
+        df.rename(columns={df.columns[0]: 'sample-id'}, inplace=True)
+        print("Renamed the first column to 'sample-id'.")
+
+    # Ensure 'sample-id' values are strings
+    df['sample-id'] = df['sample-id'].astype(str)
+
+    # Remove rows with 'x' values
+    df = df[~df.isin(['x']).any(axis=1)]
+    return df
+
+def assign_group(df, digester_prefix='Digester'):
+    # Identify digester columns and assign groups based on maximum value
+    digester_columns = [col for col in df.columns if col.startswith(digester_prefix)]
+    if not digester_columns:
+        raise KeyError("No columns found with the specified digester prefix.")
+    df = df.copy()  # Ensure we operate on a copy of the DataFrame to avoid warnings
+    df['Group'] = df[digester_columns].idxmax(axis=1)
+    print("Group assignment completed based on digester columns.")
+    return df
+
+# def split_data(df, test_size=0.2, random_state=42):
+#     train_df, test_df = train_test_split(df, test_size=test_size, random_state=random_state, stratify=df['Group'])
+#     print(f"Split data into Training ({len(train_df)}) and Testing ({len(test_df)}) sets.")
+#     return train_df, test_df
+
+def split_data(df, test_size=0.2, random_state=42):
+    from sklearn.utils import resample
+    
+    classes = df['Group'].unique()
+    train_df = pd.DataFrame()
+    test_df = pd.DataFrame()
+
+    for cls in classes:
+        class_subset = df[df['Group'] == cls]
+        class_train, class_test = train_test_split(
+            class_subset,
+            test_size=test_size,
+            random_state=random_state
+        )
+        train_df = pd.concat([train_df, class_train])
+        test_df = pd.concat([test_df, class_test])
+
+    print(f"Split data into Training ({len(train_df)}) and Testing ({len(test_df)}) sets.")
+    return train_df, test_df
+
+
+def create_metadata(df, target_columns, group_column, output_filename):
+    # Check if required columns exist
+    required_columns = ['sample-id'] + target_columns + [group_column]
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise KeyError(f"Missing required columns: {missing_columns}")
+    
+    # Create and save metadata
+    metadata = df[required_columns]
+    metadata.to_csv(output_filename, sep='\t', index=False)
+    print(f"Metadata file '{output_filename}' created successfully!")
+
+def prepare_features(df, excluded_columns):
+    feature_columns = [col for col in df.columns if col not in excluded_columns]
+    features = df[feature_columns].copy()
+    features.index = df['sample-id']
+    features.columns = features.columns.str.strip()
+    features.index = features.index.str.strip()
+
+    # Check for duplicates
+    if features.index.duplicated().any():
+        dup_samples = features.index[features.index.duplicated()]
+        print("Duplicate sample IDs found:")
+        print(dup_samples)
+        raise ValueError("Duplicate sample IDs exist. Make sure each sample-id is unique.")
+    if features.columns.duplicated().any():
+        dup_feats = features.columns[features.columns.duplicated()]
+        print("Duplicate feature IDs found:")
+        print(dup_feats)
+        raise ValueError("Duplicate feature IDs exist. Make sure each feature name is unique.")
+    
+    print("No duplicate observation IDs found.")
+    return features
+
+def export_feature_table(features, output_filename):
+    # Convert boolean values (True/False) to numeric (1/0)
+    features = features.replace({True: 1, False: 0})
+    
+    # Ensure all values are numeric
+    features = features.apply(pd.to_numeric, errors='coerce')
+
+    # Check for non-numeric values
+    if features.isnull().any().any():
+        raise ValueError("Non-numeric values found in feature table. Ensure all values are numeric.")
+
+    # Transpose the feature table so that features are rows and samples are columns
+    features_t = features.T
+
+    # Save the feature table
+    features_t.to_csv(output_filename, sep='\t', header=True, index=True)
+    print(f"Feature table exported as '{output_filename}' with numeric values and correct orientation.")
+
+def create_biom_table(features, output_filename):
+    data_matrix = features.values  # samples (rows) x features (columns)
+    observation_ids = features.columns
+    sample_ids = features.index
+
+    # After transposing data_matrix here, we get features as rows and samples as columns
+    feature_table = Table(data_matrix.T, observation_ids=observation_ids, sample_ids=sample_ids)
+    biom_data = json.loads(feature_table.to_json("Generated by Python"))
+    biom_data["format"] = "Biological Observation Matrix 2.1.0"
+    biom_data["format_url"] = "http://biom-format.org"
+    
+    with open(output_filename, 'w') as biom_file:
+        json.dump(biom_data, biom_file, indent=4)
+    
+    print(f"Feature table saved with forced BIOM v2.1.0 format as '{output_filename}'.")
+
+# ----------------------------
+# MAIN EXECUTION
+# ----------------------------
+
+def main():
+    # Load preprocessed data
+    filepath = 'Data/New_data.csv'
+    df = load_cleaned_data(filepath)
+
+    # Assign groups based on digester columns
+    df = assign_group(df)
+
+    # Define target columns and grouping column
+    target_columns = [
+        "Average-Total-ISD-Cells", "ACE-Xi", "ACE-km", "ACE-Ks", "H2-Xi", "H2-km", "H2-Ks",
+        "Digester_BD", "Digester_BF", "Digester_CB", "Digester_CP", "Digester_FD", "Digester_GB",
+        "Digester_GP", "Digester_JB", "Digester_LP", "Digester_MA", "Digester_NB", "Digester_NS",
+        "Digester_PC", "Digester_PO", "Digester_SF", "Digester_SS", "Digester_SW", "Digester_WA",
+        "Digester_WP", "Digester_WR", "Source_I", "Source_M", "Source_P", "Type_CSTR", "Type_EFB",
+        "Type_EGSB", "Type_Lagoon", "Type_UASB", "Waste_BW", "Waste_Dairy", "Waste_FW", "Waste_HSI",
+        "Waste_MPW", "Waste_MS", "Waste_MS+Dairy", "Waste_MS+HSI", "Waste_PP", "Waste_PR",
+        "Waste_SDW", "Biomass_F", "Biomass_G"
+    ]
+    group_column = 'Group'
+
+    # Split into training and testing datasets
+    train_df, test_df = split_data(df)
+
+    # Create metadata for training and testing
+    create_metadata(train_df, target_columns, group_column, 'training-sample-metadata.tsv')
+    create_metadata(test_df, target_columns, group_column, 'testing-sample-metadata.tsv')
+
+    # Prepare and export features for training
+    excluded_columns = ['sample-id', 'Group'] + target_columns
+    training_features = prepare_features(train_df, excluded_columns)
+    export_feature_table(training_features, 'training-feature-table.tsv')
+    create_biom_table(training_features, 'training-feature-table.biom')
+
+    # Prepare and export features for testing
+    testing_features = prepare_features(test_df, excluded_columns)
+    export_feature_table(testing_features, 'testing-feature-table.tsv')
+    create_biom_table(testing_features, 'testing-feature-table.biom')
+
+if __name__ == "__main__":
+    main()

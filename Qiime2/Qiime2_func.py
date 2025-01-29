@@ -67,15 +67,36 @@ def prepare_features(df, excluded_columns):
     print("No duplicate observation IDs found.")
     return features
 
+# def export_feature_table(features):
+#     # Convert boolean values (True/False) to numeric (1/0)
+#     features = features.replace({True: 1, False: 0})
+    
+#     # Ensure all values are numeric
+#     features = features.apply(pd.to_numeric, errors='coerce')
+
+#     # Check for non-numeric values
+#     if features.isnull().any().any():
+#         raise ValueError("Non-numeric values found in feature table. Ensure all values are numeric.")
+
+#     # Transpose the feature table so that features are rows and samples are columns
+#     features_t = features.T
+
+#     # Save the feature table
+#     features_t.to_csv('feature-table.tsv', sep='\t', header=True, index=True)
+#     print("Feature table exported as 'feature-table.tsv' with numeric values and correct orientation.")
+    
 def export_feature_table(features):
     # Convert boolean values (True/False) to numeric (1/0)
     features = features.replace({True: 1, False: 0})
-    
+
     # Ensure all values are numeric
     features = features.apply(pd.to_numeric, errors='coerce')
 
-    # Check for non-numeric values
+    # Identify non-numeric values
     if features.isnull().any().any():
+        non_numeric_entries = features[features.isnull().any(axis=1)]
+        print("Non-numeric values found in the following rows and columns:")
+        print(non_numeric_entries)
         raise ValueError("Non-numeric values found in feature table. Ensure all values are numeric.")
 
     # Transpose the feature table so that features are rows and samples are columns
@@ -84,6 +105,7 @@ def export_feature_table(features):
     # Save the feature table
     features_t.to_csv('feature-table.tsv', sep='\t', header=True, index=True)
     print("Feature table exported as 'feature-table.tsv' with numeric values and correct orientation.")
+
 
 def create_biom_table(features):
     data_matrix = features.values  # samples (rows) x features (columns)
@@ -107,8 +129,9 @@ def create_biom_table(features):
 
 def main():
     # Load preprocessed data
-    filepath = 'Data/New_data.csv'
-    df = load_cleaned_data(filepath)
+    filepath_relative = 'Data/New_data.csv' # Relative Abundance
+    filepath_absolute = 'Data/df.csv' # Absolute Abundance
+    df = load_cleaned_data(filepath_absolute)
 
     # Assign groups based on digester columns
     df = assign_group(df)
