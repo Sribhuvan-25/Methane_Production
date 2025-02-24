@@ -2,3 +2,5 @@ Data/
 catboost_info/
 Qiime2/Data/
 Qiime2/Generated_Results
+.venv/
+__pycache__/

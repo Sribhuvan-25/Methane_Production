@@ -1,0 +1,9 @@
+# Run interactively in the GT4SD environment
+docker run --platform linux/amd64 -it --rm --entrypoint bash -v "/Users/sb/TReNDS/DNA Project/code:/app" -w /app gt4sd:latest
+
+# Run Python script immediately on startup
+docker run --platform linux/amd64 --rm -v "/Users/sb/TReNDS/DNA Project/code:/app" -w /app gt4sd:latest python your_script.py
+
+# Keep container running in the background
+docker run --platform linux/amd64 -dit --name gt4sd_container -v "/Users/sb/TReNDS/DNA Project/code:/app" -w /app gt4sd:latest
+
