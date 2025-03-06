@@ -29,44 +29,38 @@ def load_feature_lists():
 
 def select_features_with_rfe(X, y, anchored_features, n_features=5):
     """
-    Perform RFE while keeping anchored features
+    Perform RFE while keeping anchored features and return feature importance
     """
-    # Ensure X and y have the same number of samples
-    if len(X) != len(y):
-        raise ValueError(f"X and y must have same number of samples. Got X: {len(X)}, y: {len(y)}")
-    
     # Separate anchored and non-anchored features
     non_anchored_features = [col for col in X.columns if col not in anchored_features]
     X_non_anchored = X[non_anchored_features]
     
-    # Calculate how many additional features to select
-    n_additional = max(0, n_features)
-    
-    if n_additional > 0 and len(non_anchored_features) > 0:
-        # Perform RFE on non-anchored features
-        estimator = LinearSVR(
-            random_state=42,
-            max_iter=100,
-            tol=1e-4,
-            dual=True  # Changed to True as it's required for epsilon_insensitive loss
-        )
-        rfe = RFE(estimator=estimator, n_features_to_select=n_additional)
+    if n_features > 0 and len(non_anchored_features) > 0:
+        # Perform RFE and get feature importance
+        estimator = LinearSVR(random_state=42, max_iter=100, tol=1e-4, dual=True)
+        rfe = RFE(estimator=estimator, n_features_to_select=n_features)
         rfe.fit(X_non_anchored, y)
         
-        # Get selected feature names
-        selected_additional = [f for f, selected in zip(non_anchored_features, rfe.support_) if selected]
+        # Get feature importance for selected non-anchored features
+        selected_mask = rfe.support_
+        selected_features = X_non_anchored.columns[selected_mask]
+        final_model = LinearSVR(random_state=42, max_iter=100, tol=1e-4, dual=True)
+        final_model.fit(X_non_anchored[selected_features], y)
+        
+        # Calculate importance scores and sort features
+        importance_scores = np.abs(final_model.coef_)
+        feature_importance_pairs = list(zip(selected_features, importance_scores))
+        sorted_features = [f for f, _ in sorted(feature_importance_pairs, key=lambda x: abs(x[1]), reverse=True)]
+        sorted_importance = [i for _, i in sorted(feature_importance_pairs, key=lambda x: abs(x[1]), reverse=True)]
+        
+        # Combine anchored and sorted non-anchored features
+        final_features = anchored_features + sorted_features
+        final_importance = [0] * len(anchored_features) + sorted_importance
     else:
-        selected_additional = []
+        final_features = anchored_features
+        final_importance = [0] * len(anchored_features)
     
-    # Combine anchored and selected features
-    final_features = anchored_features + selected_additional
-    
-    print(f"\nFeature Selection Results:")
-    print(f"Anchored features: {len(anchored_features)}")
-    print(f"Additional features selected: {len(selected_additional)}")
-    print(f"Total features: {len(final_features)}")
-    
-    return final_features
+    return final_features, final_importance
 
 def create_performance_plot(all_actual, all_predictions, target, mode, final_r2, final_mse, n_features):
     """Create and save performance plot with detailed information"""
@@ -76,31 +70,32 @@ def create_performance_plot(all_actual, all_predictions, target, mode, final_r2,
     sns.scatterplot(x=all_actual, y=all_predictions, alpha=0.6)
     
     # Add perfect prediction line
-    min_val = 0  # Changed from min(min(all_actual), min(all_predictions))
+    min_val = 0
     max_val = max(max(all_actual), max(all_predictions))
     plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect Prediction')
     
-    # Set axis limits to start from 0
     plt.xlim(min_val, max_val)
     plt.ylim(min_val, max_val)
     
-    # Labels and title
     plt.xlabel('Actual Values')
     plt.ylabel('Predicted Values')
     
-    # Create detailed title based on mode
+    # Update title based on mode
     if mode == "h2":
         title = f"H2-km Prediction\nUsing {3} Hydrogenotrophic + {n_features} Additional Features"
     elif mode == "ace_only":
         title = f"ACE-km Prediction\nUsing {1} Acetoclastic + {n_features} Additional Features"
     elif mode == "ace_all":
         title = f"ACE-km Prediction\nUsing All {17} Classified + {n_features} Additional Features"
+    elif mode == "ace_conditional_low":
+        title = f"ACE-km Prediction (< 10)\nUsing {1} Acetoclastic + {n_features} Additional Features"
+    elif mode == "ace_conditional_high":
+        title = f"ACE-km Prediction (≥ 10)\nUsing {17} Classified + {n_features} Additional Features"
     elif mode == "ace_conditional":
-        title = "ACE-km Prediction (Conditional)\n" + \
-                f"ACE-km < 10: {1} Acetoclastic + {n_features} Additional Features\n" + \
-                f"ACE-km ≥ 10: {17} Classified + {n_features} Additional Features"
+        title = f"ACE-km Prediction (Combined)\nUsing Conditional Features + {n_features} Additional Features"
+    else:
+        title = f"Prediction Results with {n_features} Additional Features"
     
-    # Add metrics to title
     metrics = f'R² = {final_r2:.4f}\nMSE = {final_mse:.4f}'
     plt.title(f'{title}\n{metrics}')
     
@@ -108,8 +103,8 @@ def create_performance_plot(all_actual, all_predictions, target, mode, final_r2,
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     
-    # Save plot with informative filename
-    filename = f'results/plots/results_{target}_{mode}_{n_features}features.png'
+    # Save plot with specific filename
+    filename = f'results_anchor/plots/results_{target}_{mode}_{n_features}features.png'
     plt.savefig(filename, dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -179,7 +174,7 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
 
     if mode != "ace_conditional":
         # Perform feature selection
-        selected_features = select_features_with_rfe(
+        selected_features, importance = select_features_with_rfe(
             df[all_features], 
             df[target], 
             anchored_features, 
@@ -228,8 +223,7 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
             
             # For low ACE-km
             if sum(mask_train_low) > 0:
-                # Select features for low ACE-km
-                features_low = select_features_with_rfe(
+                features_low, importance_low = select_features_with_rfe(
                     X_train[mask_train_low],
                     y_train[mask_train_low],
                     acetoclastic,
@@ -259,8 +253,7 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
             
             # For high ACE-km
             if sum(mask_train_high) > 0:
-                # Select features for high ACE-km
-                features_high = select_features_with_rfe(
+                features_high, importance_high = select_features_with_rfe(
                     X_train[mask_train_high],
                     y_train[mask_train_high],
                     acetoclastic + hydrogenotrophic + syntrophic,
@@ -320,13 +313,13 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
         feature_importance_low = pd.DataFrame({
             'Feature': features_low,
             'Is_Anchored': [f in acetoclastic for f in features_low],
-            'ACE_km_Range': ['<10'] * len(features_low)
+            'Feature_Importance': importance_low
         })
         
         feature_importance_high = pd.DataFrame({
             'Feature': features_high,
             'Is_Anchored': [f in (acetoclastic + hydrogenotrophic + syntrophic) for f in features_high],
-            'ACE_km_Range': ['>=10'] * len(features_high)
+            'Feature_Importance': importance_high
         })
         
         # Combine both feature sets
@@ -336,11 +329,12 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
         # For non-conditional modes
         feature_importance = pd.DataFrame({
             'Feature': selected_features,
-            'Is_Anchored': [f in anchored_features for f in selected_features]
+            'Is_Anchored': [f in anchored_features for f in selected_features],
+            'Feature_Importance': importance
         })
     
     # Save feature importance information
-    feature_importance.to_csv(f'results/metrics/features_{target}_{mode}.csv', index=False)
+    feature_importance.to_csv(f'results_anchor/metrics/features_{target}_{mode}_{n_features}features.csv', index=False)
 
     # Create and save plot
     create_performance_plot(all_actual, all_predictions, target, mode, final_r2, final_mse, n_features)
@@ -350,8 +344,165 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
         'Actual': all_actual,
         'Predicted': all_predictions
     })
-    results_df.to_csv(f'results/metrics/results_{target}_{mode}_{n_features}features.csv', index=False)
+    results_df.to_csv(f'results_anchor/metrics/results_{target}_{mode}_{n_features}features.csv', index=False)
 
+    if mode == "ace_conditional":
+        # Initialize separate results for low and high ACE-km
+        all_predictions_combined = []
+        all_actual_combined = []
+        all_predictions_low = []
+        all_actual_low = []
+        all_predictions_high = []
+        all_actual_high = []
+        
+        # Process low ACE-km samples
+        mask_low = df[target] < 10
+        if sum(mask_low) > 0:
+            features_low, importance_low = select_features_with_rfe(
+                df[mask_low][all_features],
+                df[mask_low][target],
+                acetoclastic,
+                n_features
+            )
+            
+            # Save feature importance for low range
+            feature_importance_low = pd.DataFrame({
+                'Feature': features_low,
+                'Is_Anchored': [f in acetoclastic for f in features_low],
+                'Feature_Importance': importance_low,
+                'ACE_km_Range': ['<10'] * len(features_low)
+            })
+            feature_importance_low.to_csv(
+                f'results_anchor/metrics/features_{target}_conditional_low_{n_features}features.csv',
+                index=False
+            )
+            
+            # Process low range predictions
+            X_low = df[mask_low][features_low]
+            y_low = df[mask_low][target]
+            r2_low, mse_low, rmse_low, results_df_low = process_subset(
+                X_low, y_low, 
+                target_suffix=f"{target}_conditional_low",
+                mode="ace_conditional_low",
+                n_features=n_features
+            )
+            
+            # Add to combined results
+            all_predictions_combined.extend(results_df_low['Predicted'])
+            all_actual_combined.extend(results_df_low['Actual'])
+        
+        # Process high ACE-km samples
+        mask_high = df[target] >= 10
+        if sum(mask_high) > 0:
+            features_high, importance_high = select_features_with_rfe(
+                df[mask_high][all_features],
+                df[mask_high][target],
+                acetoclastic + hydrogenotrophic + syntrophic,
+                n_features
+            )
+            
+            # Save feature importance for high range
+            feature_importance_high = pd.DataFrame({
+                'Feature': features_high,
+                'Is_Anchored': [f in (acetoclastic + hydrogenotrophic + syntrophic) for f in features_high],
+                'Feature_Importance': importance_high,
+                'ACE_km_Range': ['≥10'] * len(features_high)
+            })
+            feature_importance_high.to_csv(
+                f'results_anchor/metrics/features_{target}_conditional_high_{n_features}features.csv',
+                index=False
+            )
+            
+            # Process high range predictions
+            X_high = df[mask_high][features_high]
+            y_high = df[mask_high][target]
+            r2_high, mse_high, rmse_high, results_df_high = process_subset(
+                X_high, y_high, 
+                target_suffix=f"{target}_conditional_high",
+                mode="ace_conditional_high",
+                n_features=n_features
+            )
+            
+            # Add to combined results
+            all_predictions_combined.extend(results_df_high['Predicted'])
+            all_actual_combined.extend(results_df_high['Actual'])
+        
+        # Calculate combined metrics
+        final_r2_combined = r2_score(all_actual_combined, all_predictions_combined)
+        final_mse_combined = mean_squared_error(all_actual_combined, all_predictions_combined)
+        final_rmse_combined = np.sqrt(final_mse_combined)
+        
+        # Create combined plot
+        create_performance_plot(
+            all_actual_combined, 
+            all_predictions_combined, 
+            target, 
+            "ace_conditional", 
+            final_r2_combined, 
+            final_mse_combined, 
+            n_features
+        )
+        
+        # Save combined results
+        results_df_combined = pd.DataFrame({
+            'Actual': all_actual_combined,
+            'Predicted': all_predictions_combined
+        })
+        results_df_combined.to_csv(
+            f'results_anchor/metrics/results_{target}_conditional_{n_features}features.csv',
+            index=False
+        )
+        
+        # Save combined feature importance
+        feature_importance_combined = pd.concat([feature_importance_low, feature_importance_high])
+        feature_importance_combined.to_csv(
+            f'results_anchor/metrics/features_{target}_conditional_{n_features}features.csv',
+            index=False
+        )
+        
+        return {
+            'low': (r2_low, mse_low, rmse_low, results_df_low) if sum(mask_low) > 0 else None,
+            'high': (r2_high, mse_high, rmse_high, results_df_high) if sum(mask_high) > 0 else None,
+            'combined': (final_r2_combined, final_mse_combined, final_rmse_combined, results_df_combined)
+        }
+    else:
+        return final_r2, final_mse, final_rmse, results_df
+
+def process_subset(X, y, target_suffix, mode, n_features):
+    """Helper function to process a subset of data"""
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    all_predictions = []
+    all_actual = []
+    
+    for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
+        X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+        y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+        
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_val_scaled = scaler.transform(X_val)
+        
+        model = LinearSVR(random_state=42, max_iter=2000, tol=1e-4, dual=True)
+        model.fit(X_train_scaled, y_train)
+        y_pred = model.predict(X_val_scaled)
+        
+        all_predictions.extend(y_pred)
+        all_actual.extend(y_val)
+    
+    final_r2 = r2_score(all_actual, all_predictions)
+    final_mse = mean_squared_error(all_actual, all_predictions)
+    final_rmse = np.sqrt(final_mse)
+    
+    # Create plot
+    create_performance_plot(all_actual, all_predictions, target_suffix, mode, final_r2, final_mse, n_features)
+    
+    # Save results
+    results_df = pd.DataFrame({
+        'Actual': all_actual,
+        'Predicted': all_predictions
+    })
+    results_df.to_csv(f'results_anchor/metrics/results_{target_suffix}_{mode}_{n_features}features.csv', index=False)
+    
     return final_r2, final_mse, final_rmse, results_df
 
 if __name__ == "__main__":
@@ -414,18 +565,32 @@ if __name__ == "__main__":
     # For ACE-km Case 3 (conditional)
     print("\nRunning ACE-km conditional predictions...")
     for n_features in additional_features:
-        r2_ace3, mse_ace3, rmse_ace3, results_ace3 = run_linearsvr_cv(
+        results = run_linearsvr_cv(
             data_path, 
             target="ACE-km",
             mode="ace_conditional",
             n_features=n_features
         )
-        all_results[f'ACE_km_conditional_{n_features}'] = {
-            'R2': r2_ace3,
-            'MSE': mse_ace3,
-            'RMSE': rmse_ace3,
-            'Additional_Features': n_features
-        }
+        
+        # Handle low ACE-km results
+        if results['low'] is not None:
+            r2_low, mse_low, rmse_low, results_low = results['low']
+            all_results[f'ACE_km_conditional_low_{n_features}'] = {
+                'R2': r2_low,
+                'MSE': mse_low,
+                'RMSE': rmse_low,
+                'Additional_Features': n_features
+            }
+        
+        # Handle high ACE-km results
+        if results['high'] is not None:
+            r2_high, mse_high, rmse_high, results_high = results['high']
+            all_results[f'ACE_km_conditional_high_{n_features}'] = {
+                'R2': r2_high,
+                'MSE': mse_high,
+                'RMSE': rmse_high,
+                'Additional_Features': n_features
+            }
     
     # Save results to CSV
     results_df = pd.DataFrame(all_results).T

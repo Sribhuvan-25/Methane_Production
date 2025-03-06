@@ -98,7 +98,7 @@ def run_linearsvr_cv(data_path, target="ACE-km"):
         # Train model
         model = LinearSVR(
             random_state=42,
-            max_iter=100000,
+            max_iter=1000,
             tol=1e-4,
             dual=True
         )
