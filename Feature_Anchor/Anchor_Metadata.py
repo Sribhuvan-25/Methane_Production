@@ -9,13 +9,12 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import os
 
-# Create necessary directories
 def create_directories():
-    """Create necessary directories for outputs"""
+    """Create directories for organizing outputs"""
     directories = [
-        'results',
-        'results/metrics',
-        'results/plots'
+        'results_metadata/plots',
+        'results_metadata/metrics',
+        'results_metadata/selected_features'
     ]
     for directory in directories:
         os.makedirs(directory, exist_ok=True)
@@ -43,12 +42,11 @@ def select_features_with_rfe(X, y, anchored_features, n_features=5):
     n_additional = max(0, n_features)
     
     if n_additional > 0 and len(non_anchored_features) > 0:
-        # Perform RFE on non-anchored features
         estimator = LinearSVR(
             random_state=42,
             max_iter=100,
             tol=1e-4,
-            dual=True  # Changed to True as it's required for epsilon_insensitive loss
+            dual=True
         )
         rfe = RFE(estimator=estimator, n_features_to_select=n_additional)
         rfe.fit(X_non_anchored, y)
@@ -76,13 +74,9 @@ def create_performance_plot(all_actual, all_predictions, target, mode, final_r2,
     sns.scatterplot(x=all_actual, y=all_predictions, alpha=0.6)
     
     # Add perfect prediction line
-    min_val = 0  # Changed from min(min(all_actual), min(all_predictions))
+    min_val = min(min(all_actual), min(all_predictions))
     max_val = max(max(all_actual), max(all_predictions))
     plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect Prediction')
-    
-    # Set axis limits to start from 0
-    plt.xlim(min_val, max_val)
-    plt.ylim(min_val, max_val)
     
     # Labels and title
     plt.xlabel('Actual Values')
@@ -109,11 +103,11 @@ def create_performance_plot(all_actual, all_predictions, target, mode, final_r2,
     plt.tight_layout()
     
     # Save plot with informative filename
-    filename = f'results/plots/results_{target}_{mode}_{n_features}features.png'
+    filename = f'results_otu/plots/results_{target}_{mode}_{n_features}features.png'
     plt.savefig(filename, dpi=300, bbox_inches='tight')
     plt.close()
 
-def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800):
+def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=10):
     """
     Run LinearSVR with different feature anchoring strategies
     
@@ -128,11 +122,24 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
     n_features : int
         Number of additional features to select beyond anchored features
     """
-    # Add directory creation at the start
-    create_directories()
-    
     # Load data
     df = pd.read_csv(data_path)
+    
+    # Define metadata columns to exclude from training
+    # metadata_columns = [
+    #     "Average-Total-ISD-Cells", "ACE-Xi", "ACE-km", "ACE-Ks", 
+    #     "H2-Xi", "H2-km", "H2-Ks",
+    #     "Digester_BD", "Digester_BF", "Digester_CB", "Digester_CP", 
+    #     "Digester_FD", "Digester_GB", "Digester_GP", "Digester_JB", 
+    #     "Digester_LP", "Digester_MA", "Digester_NB", "Digester_NS",
+    #     "Digester_PC", "Digester_PO", "Digester_SF", "Digester_SS", 
+    #     "Digester_SW", "Digester_WA", "Digester_WP", "Digester_WR", 
+    #     "Source_I", "Source_M", "Source_P", "Type_CSTR", "Type_EFB",
+    #     "Type_EGSB", "Type_Lagoon", "Type_UASB", "Waste_BW", 
+    #     "Waste_Dairy", "Waste_FW", "Waste_HSI", "Waste_MPW", 
+    #     "Waste_MS", "Waste_MS+Dairy", "Waste_MS+HSI", "Waste_PP", 
+    #     "Waste_PR", "Waste_SDW", "Biomass_F", "Biomass_G"
+    # ]
     
     # Remove rows containing 'x'
     df = df[~df.isin(['x']).any(axis=1)]
@@ -143,26 +150,12 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
     # Load feature lists
     acetoclastic, hydrogenotrophic, syntrophic = load_feature_lists()
     
-    # Get all available features (excluding target columns)
     target_columns = ["Average-Total-ISD-Cells", "ACE-Xi", "ACE-km", "ACE-Ks", 
                      "H2-Xi", "H2-km", "H2-Ks"]
     all_features = [col for col in df.columns if col not in target_columns]
-    
-    """
-        # Case 1: H2-km prediction
-        mode="h2"  # Uses only hydrogenotrophic features (3 features)
-
-        # Case 2: ACE-km with acetoclastic only
-        mode="ace_only"  # Uses only acetoclastic feature (1 feature)
-
-        # Case 3: ACE-km with all features
-        mode="ace_all"  # Uses all 17 classified features
-
-        # Case 4: ACE-km conditional
-        mode="ace_conditional"
-        # When ACE-km < 10: Uses acetoclastic feature (1 feature)
-        # When ACE-km ≥ 10: Uses all 17 classified features
-    """
+     
+    print(f"\nDataset shape after cleaning: {df.shape}")
+    print(f"Number of features used: {len(all_features)}")
     
     # Select anchored features based on mode
     if mode == "h2":
@@ -172,7 +165,6 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
     elif mode == "ace_all":
         anchored_features = acetoclastic + hydrogenotrophic + syntrophic
     elif mode == "ace_conditional":
-        # Will handle this separately
         anchored_features = acetoclastic
     else:
         raise ValueError("Invalid mode specified")
@@ -190,9 +182,6 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
         X = df[all_features]  # We'll select features separately for each condition
     
     y = df[target]
-    
-    print(f"\nDataset shape after cleaning: {df.shape}")
-    print(f"Number of features used: {len(X.columns)}")
 
     # Initialize K-Fold
     kf = KFold(n_splits=5, shuffle=True, random_state=42)
@@ -200,13 +189,6 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
     # Store results
     all_predictions = []
     all_actual = []
-    
-    # Modify LinearSVR parameters for better convergence
-    model = LinearSVR(
-        random_state=42,
-        max_iter=2000,  # Increase max iterations
-        tol=1e-4       # Adjust tolerance
-    )
     
     # Perform cross-validation
     for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
@@ -245,7 +227,7 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
                     random_state=42,
                     max_iter=100000,
                     tol=1e-4,
-                    dual=True  # Changed to True
+                    dual=True
                 )
                 model_low.fit(X_train_low_scaled, y_train[mask_train_low])
                 
@@ -276,7 +258,7 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
                     random_state=42,
                     max_iter=100000,
                     tol=1e-4,
-                    dual=True  # Changed to True
+                    dual=True
                 )
                 model_high.fit(X_train_high_scaled, y_train[mask_train_high])
                 
@@ -296,6 +278,12 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
             X_train_scaled = scaler.fit_transform(X_train)
             X_val_scaled = scaler.transform(X_val)
             
+            model = LinearSVR(
+                random_state=42,
+                max_iter=100000,
+                tol=1e-4,
+                dual=True
+            )
             model.fit(X_train_scaled, y_train)
             y_pred = model.predict(X_val_scaled)
             
@@ -329,18 +317,15 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
             'ACE_km_Range': ['>=10'] * len(features_high)
         })
         
-        # Combine both feature sets
-        feature_importance = pd.concat([feature_importance_low, feature_importance_high], 
-                                     ignore_index=True)
+        feature_importance = pd.concat([feature_importance_low, feature_importance_high], ignore_index=True)
     else:
-        # For non-conditional modes
         feature_importance = pd.DataFrame({
             'Feature': selected_features,
             'Is_Anchored': [f in anchored_features for f in selected_features]
         })
     
     # Save feature importance information
-    feature_importance.to_csv(f'results/metrics/features_{target}_{mode}.csv', index=False)
+    feature_importance.to_csv(f'results_otu/selected_features/features_{target}_{mode}_{n_features}.csv', index=False)
 
     # Create and save plot
     create_performance_plot(all_actual, all_predictions, target, mode, final_r2, final_mse, n_features)
@@ -350,16 +335,20 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
         'Actual': all_actual,
         'Predicted': all_predictions
     })
-    results_df.to_csv(f'results/metrics/results_{target}_{mode}_{n_features}features.csv', index=False)
+    results_df.to_csv(f'results_otu/metrics/results_{target}_{mode}_{n_features}features.csv', index=False)
 
     return final_r2, final_mse, final_rmse, results_df
 
 if __name__ == "__main__":
-    # Create directories before running
+    # Create directories first
     create_directories()
     
     data_path = "../Data/New_data.csv"
+    
+    # List of additional features to test
     additional_features = [50, 100, 200, 400, 800]
+    
+    # Dictionary to store results
     all_results = {}
     
     # For H2-km prediction
@@ -372,10 +361,11 @@ if __name__ == "__main__":
             mode="h2",
             n_features=n_features
         )
-        all_results[f'H2_km_{n_features}'] = {
-            'R2': r2_h2,
-            'MSE': mse_h2,
+        all_results[f'H2_km_{n_features}_additional'] = {
+            'R2': r2_h2, 
+            'MSE': mse_h2, 
             'RMSE': rmse_h2,
+            'Anchored_Features': 3,
             'Additional_Features': n_features
         }
     
@@ -388,10 +378,11 @@ if __name__ == "__main__":
             mode="ace_only",
             n_features=n_features
         )
-        all_results[f'ACE_km_aceonly_{n_features}'] = {
-            'R2': r2_ace1,
-            'MSE': mse_ace1,
+        all_results[f'ACE_km_aceonly_{n_features}_additional'] = {
+            'R2': r2_ace1, 
+            'MSE': mse_ace1, 
             'RMSE': rmse_ace1,
+            'Anchored_Features': 1,
             'Additional_Features': n_features
         }
     
@@ -404,10 +395,11 @@ if __name__ == "__main__":
             mode="ace_all",
             n_features=n_features
         )
-        all_results[f'ACE_km_all_{n_features}'] = {
-            'R2': r2_ace2,
-            'MSE': mse_ace2,
+        all_results[f'ACE_km_all_{n_features}_additional'] = {
+            'R2': r2_ace2, 
+            'MSE': mse_ace2, 
             'RMSE': rmse_ace2,
+            'Anchored_Features': 17,
             'Additional_Features': n_features
         }
     
@@ -420,26 +412,26 @@ if __name__ == "__main__":
             mode="ace_conditional",
             n_features=n_features
         )
-        all_results[f'ACE_km_conditional_{n_features}'] = {
-            'R2': r2_ace3,
-            'MSE': mse_ace3,
+        all_results[f'ACE_km_conditional_{n_features}_additional'] = {
+            'R2': r2_ace3, 
+            'MSE': mse_ace3, 
             'RMSE': rmse_ace3,
+            'Anchored_Features_Low': 1,
+            'Anchored_Features_High': 17,
             'Additional_Features': n_features
         }
     
     # Save results to CSV
     results_df = pd.DataFrame(all_results).T
-    results_df.index = results_df.index.astype(str)  # Convert index to string type
     results_df.index.name = 'Model_Configuration'
-    results_df.to_csv('results/metrics/feature_comparison_results.csv')
+    results_df.to_csv('results_otu/metrics/feature_comparison_results.csv')
     
     # Print best configurations
     print("\nBest configurations based on R2 score:")
     for target in ['H2_km', 'ACE_km_aceonly', 'ACE_km_all', 'ACE_km_conditional']:
         target_results = results_df[results_df.index.str.startswith(target)]
-        if not target_results.empty:
-            best_config = target_results.loc[target_results['R2'].idxmax()]
-            print(f"\n{target}:")
-            print(f"Best R2: {best_config['R2']:.4f}")
-            print(f"MSE: {best_config['MSE']:.4f}")
-            print(f"Additional features: {best_config['Additional_Features']}") 
+        best_config = target_results.loc[target_results['R2'].idxmax()]
+        print(f"\n{target}:")
+        print(f"Best R2: {best_config['R2']:.4f}")
+        print(f"MSE: {best_config['MSE']:.4f}")
+        print(f"Additional features: {best_config['Additional_Features']}")
