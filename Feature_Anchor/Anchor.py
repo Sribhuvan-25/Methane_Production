@@ -13,9 +13,9 @@ import os
 def create_directories():
     """Create necessary directories for outputs"""
     directories = [
-        'results',
-        'results/metrics',
-        'results/plots'
+        'results_anchor',
+        'results_anchor/metrics',
+        'results_anchor/plots'
     ]
     for directory in directories:
         os.makedirs(directory, exist_ok=True)
@@ -274,7 +274,7 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="ace_only", n_features=800
                 
                 model_high = LinearSVR(
                     random_state=42,
-                    max_iter=100000,
+                    max_iter=100,
                     tol=1e-4,
                     dual=True  # Changed to True
                 )
@@ -431,7 +431,7 @@ if __name__ == "__main__":
     results_df = pd.DataFrame(all_results).T
     results_df.index = results_df.index.astype(str)  # Convert index to string type
     results_df.index.name = 'Model_Configuration'
-    results_df.to_csv('results/metrics/feature_comparison_results.csv')
+    results_df.to_csv('results_anchor/metrics/feature_comparison_results.csv')
     
     # Print best configurations
     print("\nBest configurations based on R2 score:")
