@@ -57,15 +57,15 @@ def select_features_with_rfe(X, y, anchored_features, n_features=5):
     X_non_anchored = X[non_anchored_features]
     
     if n_features > 0 and len(non_anchored_features) > 0:
-        # Perform RFE and get feature importance
-        estimator = LinearSVR(random_state=42, max_iter=100, tol=1e-4, dual=True)
+        # Perform RFE and get feature importance with increased max_iter to avoid convergence warnings
+        estimator = LinearSVR(random_state=42, max_iter=1000, tol=1e-4, dual=True)
         rfe = RFE(estimator=estimator, n_features_to_select=n_features)
         rfe.fit(X_non_anchored, y)
         
         # Get feature importance for selected non-anchored features
         selected_mask = rfe.support_
         selected_features = X_non_anchored.columns[selected_mask]
-        final_model = LinearSVR(random_state=42, max_iter=100, tol=1e-4, dual=True)
+        final_model = LinearSVR(random_state=42, max_iter=10000, tol=1e-4, dual=True)
         final_model.fit(X_non_anchored[selected_features], y)
         
         # Calculate importance scores and sort features
@@ -85,21 +85,53 @@ def select_features_with_rfe(X, y, anchored_features, n_features=5):
 
 def create_performance_plot(all_actual, all_predictions, target, mode, final_r2, final_mse, n_features):
     """Create and save performance plot with detailed information"""
+    # Create a simple, clean figure
     plt.figure(figsize=(10, 8))
     
-    # Create scatter plot
-    sns.scatterplot(x=all_actual, y=all_predictions, alpha=0.6)
+    # Create scatter plot with consistent styling for all points (smaller size)
+    plt.scatter(all_actual, all_predictions, alpha=0.7, color='#1f77b4', s=40)
+    
+    # Calculate min and max values 
+    min_val_x = min(all_actual)
+    max_val_x = max(all_actual)
+    min_val_y = min(all_predictions)
+    max_val_y = max(all_predictions)
+    
+    # Add 10% padding to ensure all points are clearly visible
+    x_padding = (max_val_x - min_val_x) * 0.1
+    y_padding = (max_val_y - min_val_y) * 0.1
+    
+    # If padding is too small (in case of very similar values), use a minimum padding
+    min_padding = max(max_val_x, max_val_y) * 0.05
+    x_padding = max(x_padding, min_padding)
+    y_padding = max(y_padding, min_padding)
+    
+    # Set axis limits with padding, ensuring we don't go below 0
+    x_min = max(0, min_val_x - x_padding)
+    x_max = max_val_x + x_padding
+    y_min = max(0, min_val_y - y_padding)
+    y_max = max_val_y + y_padding
+    
+    # Use the maximum range for both axes to maintain square aspect ratio
+    plot_min = min(x_min, y_min)
+    plot_max = max(x_max, y_max)
     
     # Add perfect prediction line
-    min_val = 0
-    max_val = max(max(all_actual), max(all_predictions))
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect Prediction')
+    plt.plot([plot_min, plot_max], [plot_min, plot_max], 'r--', label='Perfect Prediction (y=x)')
     
-    plt.xlim(min_val, max_val)
-    plt.ylim(min_val, max_val)
+    # Calculate and add the regression line for this case
+    coeffs = np.polyfit(all_actual, all_predictions, 1)
+    slope = coeffs[0]
+    intercept = coeffs[1]
+    x_reg = np.array([plot_min, plot_max])
+    y_reg = slope * x_reg + intercept
+    plt.plot(x_reg, y_reg, 'g-', label=f'Regression Line (y={slope:.2f}x+{intercept:.2f})')
     
-    plt.xlabel('Actual Values')
-    plt.ylabel('Predicted Values')
+    plt.xlim(plot_min, plot_max)
+    plt.ylim(plot_min, plot_max)
+    
+    plt.xlabel('Actual Values', fontsize=12)
+    plt.ylabel('Predicted Values', fontsize=12)
     
     # Update title based on mode
     if mode == "case4":
@@ -116,9 +148,9 @@ def create_performance_plot(all_actual, all_predictions, target, mode, final_r2,
         title = f"Prediction Results with {n_features} Additional Features"
     
     metrics = f'R² = {final_r2:.4f}\nMSE = {final_mse:.4f}'
-    plt.title(f'{title}\n{metrics}')
+    plt.title(f'{title}\n{metrics}', fontsize=14)
     
-    plt.legend()
+    plt.legend(fontsize=10)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     
@@ -263,7 +295,7 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="case4", n_features=50):
     # Modify LinearSVR parameters for better convergence
     model = LinearSVR(
         random_state=42,
-        max_iter=2000,  # Increase max iterations
+        max_iter=10000,  # Increased from 2000 to 10000 to avoid convergence warnings
         tol=1e-4,       # Adjust tolerance
         dual=True       # Use dual formulation
     )
@@ -318,12 +350,156 @@ def run_linearsvr_cv(data_path, target="ACE-km", mode="case4", n_features=50):
 
     return final_r2, final_mse, final_rmse, results_df
 
+def create_combined_plot(case_results, case_names):
+    """
+    Create a combined plot showing multiple cases with separate regression lines
+    
+    Parameters:
+    ----------
+    case_results : dict
+        Dictionary with case name as key and DataFrame with 'Actual' and 'Predicted' columns as value
+    case_names : list
+        List of case names to include in the plot
+    """
+    plt.figure(figsize=(10, 8))
+    
+    # Define colors for different cases
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+    
+    # Initialize for axis limits
+    all_actual = []
+    all_predicted = []
+    all_r2 = {}
+    all_mse = {}
+    
+    # Map case names to more readable descriptions
+    case_descriptions = {
+        'case4': 'All Features',
+        'case5': 'ACE-km ≤ 10',
+        'case6': 'Biomass F',
+        'case7': 'ACE-km > 10',
+        'case8': 'Biomass G'
+    }
+    
+    # Plot each case with its own color and regression line
+    for i, case in enumerate(case_names):
+        if case not in case_results:
+            print(f"Warning: {case} not found in results")
+            continue
+            
+        results = case_results[case]
+        actual = results['Actual']
+        predicted = results['Predicted']
+        
+        # Get readable case name
+        case_desc = case_descriptions.get(case, case)
+        
+        # Add to aggregate data for axis limits
+        all_actual.extend(actual)
+        all_predicted.extend(predicted)
+        
+        # Calculate metrics
+        r2 = r2_score(actual, predicted)
+        mse = mean_squared_error(actual, predicted)
+        all_r2[case] = r2
+        all_mse[case] = mse
+        
+        # Plot scatter for this case
+        color = colors[i % len(colors)]
+        plt.scatter(actual, predicted, alpha=0.7, s=40, 
+                   color=color, label=f'{case_desc} (R²={r2:.4f})')
+        
+        # Calculate and plot regression line for this case
+        coeffs = np.polyfit(actual, predicted, 1)
+        slope = coeffs[0]
+        intercept = coeffs[1]
+        
+        # Create label for regression line
+        reg_label = f'{case_desc} Regression (y={slope:.2f}x+{intercept:.2f})'
+        
+        # Add regression line with label
+        x_min, x_max = min(actual), max(actual)
+        x_reg = np.array([x_min, x_max])
+        y_reg = slope * x_reg + intercept
+        plt.plot(x_reg, y_reg, color=color, linestyle='-', alpha=0.8, label=reg_label)
+    
+    # Calculate padding for axis limits
+    min_val_x = min(all_actual)
+    max_val_x = max(all_actual)
+    min_val_y = min(all_predicted)
+    max_val_y = max(all_predicted)
+    
+    x_padding = (max_val_x - min_val_x) * 0.1
+    y_padding = (max_val_y - min_val_y) * 0.1
+    
+    # If padding is too small, use a minimum padding
+    min_padding = max(max_val_x, max_val_y) * 0.05
+    x_padding = max(x_padding, min_padding)
+    y_padding = max(y_padding, min_padding)
+    
+    # Set axis limits with padding
+    x_min = max(0, min_val_x - x_padding)
+    x_max = max_val_x + x_padding
+    y_min = max(0, min_val_y - y_padding)
+    y_max = max_val_y + y_padding
+    
+    # Use the maximum range for both axes
+    plot_min = min(x_min, y_min)
+    plot_max = max(x_max, y_max)
+    
+    # Add perfect prediction line
+    plt.plot([plot_min, plot_max], [plot_min, plot_max], 'k--', alpha=0.5, label='Perfect Prediction (y=x)')
+    
+    plt.xlim(plot_min, plot_max)
+    plt.ylim(plot_min, plot_max)
+    
+    plt.xlabel('Actual Values', fontsize=12)
+    plt.ylabel('Predicted Values', fontsize=12)
+    
+    # Create title based on the cases being combined
+    case_desc_list = [case_descriptions.get(case, case) for case in case_names if case in case_results]
+    title = f"Combined Plot: {' vs '.join(case_desc_list)}"
+    
+    # Calculate combined R² and MSE if needed
+    if len(case_names) > 1:
+        all_actual_combined = []
+        all_predicted_combined = []
+        for case in case_names:
+            if case in case_results:
+                all_actual_combined.extend(case_results[case]['Actual'])
+                all_predicted_combined.extend(case_results[case]['Predicted'])
+        
+        if all_actual_combined:
+            combined_r2 = r2_score(all_actual_combined, all_predicted_combined)
+            combined_mse = mean_squared_error(all_actual_combined, all_predicted_combined)
+            combined_metrics = f'Combined: R² = {combined_r2:.4f}, MSE = {combined_mse:.4f}'
+            plt.title(f'{title}\n{combined_metrics}', fontsize=14)
+        else:
+            plt.title(title, fontsize=14)
+    else:
+        plt.title(title, fontsize=14)
+    
+    # Improve the legend by adjusting size and position
+    plt.legend(fontsize=9, loc='best', framealpha=0.7)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    # Save plot with specific filename
+    case_str = '_and_'.join(case_names)
+    filename = f'results_extension/plots/combined_results_{case_str}.png'
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Combined plot saved as {filename}")
+    
+    return all_r2, all_mse
+
 if __name__ == "__main__":
     # Create directories before running
     create_directories()
     
     data_path = "../Data/New_data.csv"
-    additional_features = [50]  # Can modify to try different numbers of features
+    additional_features = [50, 100, 200, 400, 800]  # Can modify to try different numbers of features
     all_results = {}
     
     # Define all cases to run
@@ -371,5 +547,51 @@ if __name__ == "__main__":
         # Print summary of results
         print("\nSummary of results:")
         print(results_df.to_string())
+        
+        # After running all cases, create combined plots
+        # For example, combine case5 (ACE-km ≤ 10) and case7 (ACE-km > 10)
+        if all_results:
+            # Organize results by case for combined plotting
+            case_results = {}
+            for mode, description in cases:
+                n_features = 50  # Use the results with 50 additional features
+                result_key = f'ACE_km_{mode}_{n_features}'
+                
+                if result_key in all_results:
+                    # Get the saved result files
+                    results_file = f'results_extension/metrics/results_ACE-km_{mode}_{n_features}features.csv'
+                    if os.path.exists(results_file):
+                        results_df = pd.read_csv(results_file)
+                        # Rename columns to standard names if needed
+                        if 'Actual' not in results_df.columns and 'actual' in results_df.columns:
+                            results_df = results_df.rename(columns={'actual': 'Actual'})
+                        if 'Predicted' not in results_df.columns and 'predicted' in results_df.columns:
+                            results_df = results_df.rename(columns={'predicted': 'Predicted'})
+                        
+                        case_results[mode] = results_df
+            
+            # Create combined plot for case5 and case7 (low and high ACE-km values)
+            if 'case5' in case_results and 'case7' in case_results:
+                print("\nCreating combined plot for case5 (ACE-km ≤ 10) and case7 (ACE-km > 10)")
+                combined_r2, combined_mse = create_combined_plot(
+                    case_results, 
+                    ['case5', 'case7']
+                )
+                
+                print("\nCombined plot metrics:")
+                for case, r2 in combined_r2.items():
+                    print(f"{case}: R² = {r2:.4f}, MSE = {combined_mse[case]:.4f}")
+            
+            # Create combined plot for case6 and case8 (Biomass F and G)
+            if 'case6' in case_results and 'case8' in case_results:
+                print("\nCreating combined plot for case6 (Biomass F) and case8 (Biomass G)")
+                combined_r2, combined_mse = create_combined_plot(
+                    case_results, 
+                    ['case6', 'case8']
+                )
+                
+                print("\nCombined plot metrics:")
+                for case, r2 in combined_r2.items():
+                    print(f"{case}: R² = {r2:.4f}, MSE = {combined_mse[case]:.4f}")
     else:
         print("\nNo results to summarize. Check for errors in the cases.") 
