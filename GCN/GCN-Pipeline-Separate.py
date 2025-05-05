@@ -9,6 +9,10 @@ from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GCNConv, BatchNorm, global_mean_pool
 from torch_geometric.nn import GATConv, SAGEConv
+from torch_geometric.data import Data
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn import global_mean_pool
+from torch_geometric.nn.models import GCN, GraphSAGE, GIN, GAT, PNA
 from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_error, r2_score
 import matplotlib.pyplot as plt
@@ -217,6 +221,89 @@ print(f"Each graph has {num_nodes} nodes (microbial families) and {edge_index.sh
 print(f"Target dimensions: {graphs[0].y.shape}")
 
 #%% Model Definition for Single Output
+
+import torch
+import torch.nn as nn
+from torch_geometric.nn.models import GCN, GraphSAGE, GIN, GAT, PNA  # wrapper models
+from torch_geometric.nn import global_mean_pool                             # graph readout
+
+class BuiltinGNN(nn.Module):
+    def __init__(self,
+                 model_name: str,
+                 in_channels: int,
+                 hidden_channels: int,
+                 num_layers: int,
+                 out_channels: int,
+                 dropout: float = 0.0,
+                 act: str = 'relu',
+                 jk: str = None,
+                 **kwargs):
+        """
+        model_name: one of "GCN", "GraphSAGE", "GIN", "GAT", "PNA"
+        kwargs are passed to the chosen model (e.g., aggregators for PNA)
+        """
+        super().__init__()
+        if model_name == 'GCN':
+            self.gnn = GCN(in_channels,
+                           hidden_channels,
+                           num_layers,
+                           out_channels=hidden_channels,
+                           dropout=dropout,
+                           act=act,
+                           jk=jk,
+                           **kwargs)           # :contentReference[oaicite:5]{index=5}
+        elif model_name == 'GraphSAGE':
+            self.gnn = GraphSAGE(in_channels,
+                                 hidden_channels,
+                                 num_layers,
+                                 out_channels=hidden_channels,
+                                 dropout=dropout,
+                                 act=act,
+                                 jk=jk,
+                                 **kwargs)      # :contentReference[oaicite:6]{index=6}
+        elif model_name == 'GIN':
+            self.gnn = GIN(in_channels,
+                           hidden_channels,
+                           num_layers,
+                           out_channels=hidden_channels,
+                           dropout=dropout,
+                           act=act,
+                           jk=jk,
+                           **kwargs)          # :contentReference[oaicite:7]{index=7}
+        elif model_name == 'GAT':
+            self.gnn = GAT(in_channels,
+                           hidden_channels,
+                           num_layers,
+                           out_channels=hidden_channels,
+                           dropout=dropout,
+                           act=act,
+                           jk=jk,
+                           **kwargs)          # :contentReference[oaicite:8]{index=8}
+        elif model_name == 'PNA':
+            self.gnn = PNA(in_channels,
+                           hidden_channels,
+                           num_layers,
+                           out_channels=hidden_channels,
+                           dropout=dropout,
+                           act=act,
+                           jk=jk,
+                           **kwargs)          # :contentReference[oaicite:9]{index=9}
+        else:
+            raise ValueError(f"Unsupported model: {model_name}")
+
+        # final projection to your target dimension
+        self.head = nn.Linear(hidden_channels, out_channels)
+
+    def forward(self, data):
+        # data.x: [total_nodes, in_channels]
+        # data.edge_index: [2, total_edges]
+        # data.batch: [total_nodes] with graph indices
+        x = self.gnn(data.x, data.edge_index, data.batch)  # returns [batch_size, hidden_channels]
+        x = global_mean_pool(x, data.batch)                # :contentReference[oaicite:10]{index=10}
+        return self.head(x)                                # [batch_size, out_channels]
+
+
+
 class PaperGCNModel(nn.Module):
     def __init__(self, in_channels, hidden_channels=64, fc_hidden_dims=[128, 64, 32, 16], out_channels=1):
         super(PaperGCNModel, self).__init__()
@@ -334,20 +421,35 @@ def train_model(target_idx, target_name):
         train_loader = DataLoader(train_graphs, batch_size=16, shuffle=True)
         val_loader = DataLoader(val_graphs, batch_size=16, shuffle=False)
         
-        model = PaperGCNModel(
-            in_channels=1,
-            hidden_channels=64,
-            fc_hidden_dims=[128, 64, 32, 16],
-            out_channels=1
-        ).to(device)
+        # model = PaperGCNModel(
+        #     in_channels=1,
+        #     hidden_channels=64,
+        #     fc_hidden_dims=[128, 64, 32, 16],
+        #     out_channels=1
+        # ).to(device)
         
-        model = ImprovedGATModel(
+        # model = ImprovedGATModel(
+        #     in_channels=1,
+        #     hidden_channels=64,
+        #     out_channels=1,
+        #     heads=4,
+        #     dropout=0.6
+        # ).to(device)
+        
+        model = BuiltinGNN(
+            model_name='GCN',
             in_channels=1,
             hidden_channels=64,
+            num_layers=3,
             out_channels=1,
-            heads=4,
-            dropout=0.3
-        ).to(device)
+            dropout=0.3,
+            act='relu',
+            jk='cat',
+            # for PNA you might pass:
+            # aggregators=['mean','max','sum','min'],
+            # scalers=['identity','amplification','attenuation'],
+            # edge_dim=...,
+        )
         
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
         loss_fn = nn.MSELoss()
@@ -414,3 +516,6 @@ ace_preds, ace_trues, ace_mse, ace_r2 = train_model(0, "ACE-km")
 print("\nTraining H2-km Model...")
 h2_preds, h2_trues, h2_mse, h2_r2 = train_model(1, "H2-km") 
 # %%
+
+
+# 
