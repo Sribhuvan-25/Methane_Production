@@ -1,232 +1,137 @@
 #%% Imports and Setup
-import pandas as pd
+import os
+import itertools
 import collections
+
+import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.data import Data
-from torch_geometric.loader import DataLoader
-from torch_geometric.nn import GCNConv, BatchNorm, global_mean_pool
-from torch_geometric.nn import GATConv, SAGEConv
-from torch_geometric.data import Data
-from torch_geometric.loader import DataLoader
-from torch_geometric.nn import global_mean_pool
-from torch_geometric.nn.models import GCN, GraphSAGE, GIN, GAT, PNA
-from sklearn.model_selection import KFold
-from sklearn.metrics import mean_squared_error, r2_score
-import matplotlib.pyplot as plt
-import networkx as nx
+
 from scipy.spatial.distance import pdist, squareform
 from scipy.stats import pearsonr
-import itertools
-import os
+
+from torch_geometric.data import Data
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn.models import GCN, GraphSAGE, GIN, GAT, PNA
+
+from sklearn.model_selection import KFold
+from sklearn.metrics import mean_squared_error, r2_score
+
+import matplotlib.pyplot as plt
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 
 #%% Data Loading and Preprocessing
 data_path = "../Data/New_data.csv"
 df = pd.read_csv(data_path)
 df = df[~df.isin(['x']).any(axis=1)]
-print(df.columns)
-otu_cols = [col for col in df.columns if "d__" in col]
-meta_cols = [col for col in df.columns if col not in otu_cols]
+
+otu_cols  = [c for c in df.columns if "d__" in c]
+meta_cols = [c for c in df.columns if c not in otu_cols]
 
 def extract_family_from_colname(colname):
-    parts = colname.split(';')
-    for part in parts:
+    for part in colname.split(';'):
         part = part.strip()
         if part.startswith('f__'):
-            fam = part[3:]
-            return fam if fam else "UnclassifiedFamily"
+            return part[3:] or "UnclassifiedFamily"
     return "UnclassifiedFamily"
 
-col_to_family = {}
-for c in otu_cols:
-    family = extract_family_from_colname(c)
-    col_to_family[c] = family
-
+col_to_family = {c: extract_family_from_colname(c) for c in otu_cols}
 family_to_cols = collections.defaultdict(list)
-for c in otu_cols:
-    fam = col_to_family[c]
+for c, fam in col_to_family.items():
     family_to_cols[fam].append(c)
 
-df_fam = pd.DataFrame(index=df.index)
-for fam, col_list in family_to_cols.items():
-    df_fam[fam] = df[col_list].sum(axis=1)
+df_fam = pd.DataFrame({
+    fam: df[cols].sum(axis=1)
+    for fam, cols in family_to_cols.items()
+}, index=df.index)
 
-param_df = df[meta_cols].copy()
+param_df   = df[meta_cols].copy()
 df_fam_rel = df_fam.div(df_fam.sum(axis=1), axis=0)
 
 df_fam_rel.to_csv("family_abundance.csv", index=False)
 param_df.to_csv("parameters.csv", index=False)
 
+
 #%% Filtering Families
 df_fam_rel = pd.read_csv("family_abundance.csv")
-param_df = pd.read_csv("parameters.csv")
+param_df   = pd.read_csv("parameters.csv")
 param_df.columns = param_df.columns.str.strip()
 
-presence_count = (df_fam_rel > 0).sum(axis=0)
-prevalence = presence_count / df_fam_rel.shape[0]
-prev_threshold = 0.05
-high_prev_families = prevalence[prevalence >= prev_threshold].index
+presence_count = (df_fam_rel > 0).sum(0)
+prevalence     = presence_count / df_fam_rel.shape[0]
+high_prev      = prevalence[prevalence >= 0.05].index
 
-mean_abund = df_fam_rel.mean(axis=0)
-abund_threshold = 0.01
-high_abund_families = mean_abund[mean_abund >= abund_threshold].index
+mean_abund     = df_fam_rel.mean(0)
+high_abund     = mean_abund[mean_abund >= 0.01].index
 
-selected_families = high_prev_families.intersection(high_abund_families)
+selected_families   = high_prev.intersection(high_abund)
 df_fam_rel_filtered = df_fam_rel[selected_families].copy()
 print(f"Selected {len(selected_families)} families after filtering.")
 
-#%% Constructing Node Features
-target_cols = ['ACE-km', 'H2-km']
 
-# Extract targets (graph-level labels)
-target_data = param_df[target_cols].copy()
+#%% Construct Node Features & Targets
+target_cols    = ['ACE-km', 'H2-km']
+target_data    = param_df[target_cols].copy()
+df_microbe     = df_fam_rel_filtered.apply(lambda x: np.sqrt(np.sqrt(x)))
+node_feature_names = list(df_microbe.columns)
+num_nodes      = len(node_feature_names)
+feature_matrix = df_microbe.values.astype(np.float32)
+print(f"Node feature matrix: {feature_matrix.shape} (samples × nodes)")
 
-# Remove the target columns from param_inputs if they exist
-param_inputs = param_df.drop(columns=target_cols, errors='ignore')
 
-# Double square-root transformation for microbial relative abundances
-df_microbe_sqrt = df_fam_rel_filtered.apply(lambda x: np.sqrt(np.sqrt(x)))
-
-# ONLY use microbial features as nodes
-node_features_df = df_microbe_sqrt.copy()
-print("Node feature matrix shape (samples x nodes):", node_features_df.shape)
-
-# Record feature names - only microbial features now
-node_feature_names = list(node_features_df.columns)
-print(f"Number of node features: {len(node_feature_names)}")
-
-#%% Edge Construction via Mantel Test
-def compute_distance_matrix(vec, metric='euclidean'):
-    if metric == 'euclidean':
-        dm = squareform(pdist(vec[:, None], metric='euclidean'))
-    elif metric == 'braycurtis':
-        dm = squareform(pdist(vec[:, None], metric='braycurtis'))
-    else:
-        raise ValueError("Unsupported metric.")
-    dm = np.nan_to_num(dm, nan=0.0, posinf=0.0, neginf=0.0)
-    return dm
-
+#%% Build Edges via Mantel Test
 os.makedirs('intermediate_results', exist_ok=True)
 
-demo_nodes = node_feature_names[:2]
-print("\n=== DEMONSTRATION OF DISTANCE MATRIX COMPUTATION AND MANTEL TEST ===")
-print(f"Selected nodes for demonstration: {demo_nodes}")
+def compute_distance_matrix(vec, metric='braycurtis'):
+    dm = squareform(pdist(vec[:, None], metric=metric))
+    return np.nan_to_num(dm, nan=0.0, posinf=0.0, neginf=0.0)
 
-f = open('intermediate_results/distance_matrices_and_edges.txt', 'w')
-f.write("=== DISTANCE MATRICES AND EDGE ESTABLISHMENT ANALYSIS ===\n\n")
-
-dist_mats = {}
-for col in node_feature_names:
-    values = node_features_df[col].values.astype(np.float32)
-    if col in demo_nodes:
-        f.write(f"\n--- Processing node: {col} ---\n")
-        f.write(f"Raw values (first 10): {values[:10]}\n")
-        values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
-        f.write(f"Values after NaN/inf replacement (first 10): {values[:10]}\n")
-        dist_mats[col] = compute_distance_matrix(values, metric='braycurtis')
-        f.write(f"Distance matrix shape: {dist_mats[col].shape}\n")
-        f.write(f"Distance matrix (first 10x10):\n")
-        np.savetxt(f, dist_mats[col][:10, :10], fmt='%.4f')
-        f.write("\n")
-    else:
-        values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
-        dist_mats[col] = compute_distance_matrix(values, metric='braycurtis')
-
-def mantel_test(dist_matrix1, dist_matrix2, permutations=999):
-    n = dist_matrix1.shape[0]
+def mantel_test(d1, d2, permutations=999):
+    n   = d1.shape[0]
     idx = np.triu_indices(n, k=1)
-    d1 = dist_matrix1[idx]
-    d2 = dist_matrix2[idx]
-    
-    f.write(f"\n--- Mantel Test Details ---\n")
-    f.write(f"Upper triangular indices shape: {idx[0].shape}\n")
-    f.write(f"Extracted distance vectors shape: d1={d1.shape}, d2={d2.shape}\n")
-    f.write(f"Distance vector means: d1={d1.mean():.4f}, d2={d2.mean():.4f}\n")
-    
-    if d1.std() == 0 or d2.std() == 0:
-        f.write("Warning: Zero standard deviation detected\n")
+    v1, v2 = d1[idx], d2[idx]
+    if v1.std()==0 or v2.std()==0:
         return 1.0, 0.0
-    
-    r_obs = pearsonr(d1, d2)[0]
-    f.write(f"Observed correlation (r_obs): {r_obs:.4f}\n")
-    
-    count = 0
-    for i in range(permutations):
-        perm = np.random.permutation(n)
-        d2_perm = dist_matrix2[perm][:, perm]
-        r_perm = pearsonr(d1, d2_perm[idx])[0]
-        if abs(r_perm) >= abs(r_obs):
-            count += 1
-        if i < 5:
-            f.write(f"Permutation {i+1}: r_perm={r_perm:.4f}\n")
-    
-    p_val = (count + 1) / (permutations + 1)
-    f.write(f"Final p-value: {p_val:.4f}\n")
-    return p_val, r_obs
+    r_obs = pearsonr(v1, v2)[0]
+    count = sum(
+        abs(pearsonr(v1, np.random.permutation(v2))[0]) >= abs(r_obs)
+        for _ in range(permutations)
+    )
+    return (count + 1) / (permutations + 1), r_obs
 
-f.write("\n=== MANTEL TEST RESULTS BETWEEN DEMO NODES ===\n")
-for i, j in itertools.combinations(range(len(demo_nodes)), 2):
-    col_i = demo_nodes[i]
-    col_j = demo_nodes[j]
-    f.write(f"\nTesting edge between: {col_i} and {col_j}\n")
-    p_val, r_val = mantel_test(dist_mats[col_i], dist_mats[col_j], permutations=999)
-    f.write(f"Results: p-value={p_val:.4f}, correlation={r_val:.4f}\n")
-    if p_val < 0.05:
-        f.write("SIGNIFICANT EDGE FOUND!\n")
-    else:
-        f.write("No significant edge\n")
+dist_mats = {
+    fam: compute_distance_matrix(feature_matrix[:, i], metric='braycurtis')
+    for i, fam in enumerate(node_feature_names)
+}
 
-edge_index_list = [[], []]
-num_nodes = len(node_feature_names)
+edge_i, edge_j = [], []
 for i, j in itertools.combinations(range(num_nodes), 2):
-    col_i = node_feature_names[i]
-    col_j = node_feature_names[j]
-    p_val, r_val = mantel_test(dist_mats[col_i], dist_mats[col_j], permutations=999)
-    if p_val < 0.05:
-        edge_index_list[0].extend([i, j])
-        edge_index_list[1].extend([j, i])
-edge_index = torch.tensor(edge_index_list, dtype=torch.long)
-print("\nTotal edges (undirected) defined by Mantel test:", edge_index.shape[1]//2)
+    p, _ = mantel_test(dist_mats[node_feature_names[i]],
+                       dist_mats[node_feature_names[j]], permutations=999)
+    if p < 0.05:
+        edge_i += [i, j]
+        edge_j += [j, i]
 
-f.close()
-print("Intermediate results saved to 'intermediate_results/distance_matrices_and_edges.txt'")
+edge_index = torch.tensor([edge_i, edge_j], dtype=torch.long)
+print("Total undirected edges:", edge_index.shape[1] // 2)
 
-#%% Create PyG Data Objects for Each Sample
-node_features_df = node_features_df.apply(pd.to_numeric, errors='coerce')
-print("Node feature matrix shape (samples x nodes):", node_features_df.shape)
-node_features = node_features_df.values.astype(np.float32)
 
-# Graph-level target values
-target_data = target_data.apply(pd.to_numeric, errors='coerce')
-
+#%% Create PyG Data Objects
 graphs = []
-for idx in range(len(node_features_df)):
-    # Create node features tensor
-    x = torch.tensor(node_features[idx], dtype=torch.float).unsqueeze(1)  # shape: [num_nodes, 1]
-    
-    # Create graph-level target tensor
-    y_vals = target_data.iloc[idx].values.astype(np.float32)
-    y = torch.tensor(y_vals, dtype=torch.float).view(-1, 2)  # shape: [1, 2]
-    
-    # Create graph with edge_index and graph-level target
-    graph = Data(x=x, edge_index=edge_index, y=y)
-    graphs.append(graph)
+for idx in range(len(feature_matrix)):
+    x = torch.tensor(feature_matrix[idx], dtype=torch.float).unsqueeze(1)  
+    # 1) **No** .view(1,2) — store as 1‐D vector of length 2
+    y = torch.tensor(target_data.iloc[idx].values.astype(np.float32), dtype=torch.float)  # shape [2]
+    graphs.append(Data(x=x, edge_index=edge_index, y=y))
 
-print(f"Created {len(graphs)} graph data objects (one per sample).")
-print(f"Each graph has {num_nodes} nodes (microbial families) and {edge_index.shape[1]//2} undirected edges.")
-print(f"Target dimensions: {graphs[0].y.shape}")
+print(f"Created {len(graphs)} graphs with {num_nodes} nodes each.")
 
-#%% Model Definition for Single Output
 
-import torch
-import torch.nn as nn
-from torch_geometric.nn.models import GCN, GraphSAGE, GIN, GAT, PNA  # wrapper models
-from torch_geometric.nn import global_mean_pool                             # graph readout
-
+#%% Built-in GNN Wrapper
 class BuiltinGNN(nn.Module):
     def __init__(self,
                  model_name: str,
@@ -234,288 +139,253 @@ class BuiltinGNN(nn.Module):
                  hidden_channels: int,
                  num_layers: int,
                  out_channels: int,
-                 dropout: float = 0.0,
+                 dropout: float = 0.3,
                  act: str = 'relu',
-                 jk: str = None,
+                 jk: str  = None,
                  **kwargs):
-        """
-        model_name: one of "GCN", "GraphSAGE", "GIN", "GAT", "PNA"
-        kwargs are passed to the chosen model (e.g., aggregators for PNA)
-        """
         super().__init__()
+        
+        # For GCN, use our custom implementation with GCNConv
         if model_name == 'GCN':
-            self.gnn = GCN(in_channels,
-                           hidden_channels,
-                           num_layers,
-                           out_channels=hidden_channels,
-                           dropout=dropout,
-                           act=act,
-                           jk=jk,
-                           **kwargs)           # :contentReference[oaicite:5]{index=5}
-        elif model_name == 'GraphSAGE':
-            self.gnn = GraphSAGE(in_channels,
-                                 hidden_channels,
-                                 num_layers,
-                                 out_channels=hidden_channels,
-                                 dropout=dropout,
-                                 act=act,
-                                 jk=jk,
-                                 **kwargs)      # :contentReference[oaicite:6]{index=6}
-        elif model_name == 'GIN':
-            self.gnn = GIN(in_channels,
-                           hidden_channels,
-                           num_layers,
-                           out_channels=hidden_channels,
-                           dropout=dropout,
-                           act=act,
-                           jk=jk,
-                           **kwargs)          # :contentReference[oaicite:7]{index=7}
-        elif model_name == 'GAT':
-            self.gnn = GAT(in_channels,
-                           hidden_channels,
-                           num_layers,
-                           out_channels=hidden_channels,
-                           dropout=dropout,
-                           act=act,
-                           jk=jk,
-                           **kwargs)          # :contentReference[oaicite:8]{index=8}
-        elif model_name == 'PNA':
-            self.gnn = PNA(in_channels,
-                           hidden_channels,
-                           num_layers,
-                           out_channels=hidden_channels,
-                           dropout=dropout,
-                           act=act,
-                           jk=jk,
-                           **kwargs)          # :contentReference[oaicite:9]{index=9}
+            self.use_custom_impl = True
+            from torch_geometric.nn import GCNConv, global_mean_pool
+            
+            # Create layers
+            self.convs = nn.ModuleList()
+            self.batch_norms = nn.ModuleList()
+            
+            # First layer
+            self.convs.append(GCNConv(in_channels, hidden_channels, add_self_loops=False))
+            self.batch_norms.append(nn.BatchNorm1d(hidden_channels))
+            
+            # Middle layers
+            for _ in range(num_layers - 1):
+                self.convs.append(GCNConv(hidden_channels, hidden_channels, add_self_loops=False))
+                self.batch_norms.append(nn.BatchNorm1d(hidden_channels))
+            
+            # Activation function
+            if act == 'relu':
+                self.act_fn = F.relu
+            elif act == 'elu':
+                self.act_fn = F.elu
+            else:
+                self.act_fn = F.relu
+            
+            self.dropout = nn.Dropout(dropout)
         else:
-            raise ValueError(f"Unsupported model: {model_name}")
-
-        # final projection to your target dimension
+            # For other models, use the high-level wrappers
+            self.use_custom_impl = False
+            model_map = {
+                'GraphSAGE': GraphSAGE,
+                'GIN':       GIN,
+                'GAT':       GAT,
+                'PNA':       PNA,
+            }
+            Wrapper = model_map[model_name]
+            
+            self.gnn = Wrapper(
+                in_channels=in_channels,
+                hidden_channels=hidden_channels,
+                num_layers=num_layers,
+                out_channels=hidden_channels,
+                dropout=dropout,
+                act=act,
+                jk=jk,
+                **kwargs
+            )
+        
         self.head = nn.Linear(hidden_channels, out_channels)
 
     def forward(self, data):
-        # data.x: [total_nodes, in_channels]
-        # data.edge_index: [2, total_edges]
-        # data.batch: [total_nodes] with graph indices
-        x = self.gnn(data.x, data.edge_index, data.batch)  # returns [batch_size, hidden_channels]
-        x = global_mean_pool(x, data.batch)                # :contentReference[oaicite:10]{index=10}
-        return self.head(x)                                # [batch_size, out_channels]
-
-
-
-class PaperGCNModel(nn.Module):
-    def __init__(self, in_channels, hidden_channels=64, fc_hidden_dims=[128, 64, 32, 16], out_channels=1):
-        super(PaperGCNModel, self).__init__()
-        
-        self.conv1 = GCNConv(in_channels, hidden_channels)
-        self.conv2 = GCNConv(hidden_channels, hidden_channels)
-        
-        self.bn1 = BatchNorm(hidden_channels)
-        self.bn2 = BatchNorm(hidden_channels)
-        
-        self.fc1 = nn.Linear(hidden_channels, fc_hidden_dims[0])
-        self.fc2 = nn.Linear(fc_hidden_dims[0], fc_hidden_dims[1])
-        self.fc3 = nn.Linear(fc_hidden_dims[1], fc_hidden_dims[2])
-        self.fc4 = nn.Linear(fc_hidden_dims[2], fc_hidden_dims[3])
-        
-        self.out = nn.Linear(fc_hidden_dims[3], out_channels)
-        self.dropout = nn.Dropout(p=0.3)
-        
-    def forward(self, data):
-        x, edge_index, batch = data.x, data.edge_index, data.batch
-        
-        x = self.conv1(x, edge_index)
-        x = F.relu(x)
-        x = self.bn1(x)
-        x = self.dropout(x)
-        
-        x = self.conv2(x, edge_index)
-        x = F.relu(x)
-        x = self.bn2(x)
-        x = self.dropout(x)
-        
-        x = global_mean_pool(x, batch)
-        
-        x = F.relu(self.fc1(x))
-        x = self.dropout(x)
-        
-        x = F.relu(self.fc2(x))
-        x = self.dropout(x)
-        
-        x = F.relu(self.fc3(x))
-        x = self.dropout(x)
-        
-        x = F.relu(self.fc4(x))
-        x = self.dropout(x)
-        
-        out = self.out(x)
-        return out
-from torch_geometric.nn import global_add_pool, global_mean_pool, GATConv
-class ImprovedGATModel(nn.Module):
-    def __init__(self, in_channels, hidden_channels=64, out_channels=1, heads=4, dropout=0.3):
-        super(ImprovedGATModel, self).__init__()
-        
-        # GAT layers with multi-head attention
-        self.conv1 = GATConv(in_channels, hidden_channels // heads, heads=heads)
-        self.conv2 = GATConv(hidden_channels, hidden_channels, heads=1)
-        
-        # Layer normalization (more efficient than batch norm for small batches)
-        self.norm1 = nn.LayerNorm(hidden_channels)
-        
-        # Attention-based pooling
-        self.pool_attn = nn.Linear(hidden_channels, 1)
-        
-        # Simplified FC layers (just two instead of four)
-        self.fc1 = nn.Linear(hidden_channels, hidden_channels)
-        self.fc2 = nn.Linear(hidden_channels, out_channels)
-        
-        self.dropout = nn.Dropout(dropout)
-        
-    def forward(self, data):
-        x, edge_index, batch = data.x, data.edge_index, data.batch
-        
-        # First GAT layer with attention
-        x = self.conv1(x, edge_index)
-        x = F.elu(x)  # ELU is often better than ReLU for GAT
-        x = self.dropout(x)
-        
-        # Second GAT layer with residual connection
-        x_res = x
-        x = self.conv2(x, edge_index)
-        x = x + x_res  # Residual connection
-        x = self.norm1(x)
-        x = F.elu(x)
-        x = self.dropout(x)
-        
-        # Attention-based pooling (instead of simple mean pooling)
-        attn_weights = self.pool_attn(x)
-        attn_weights = F.softmax(attn_weights, dim=0)
-        
-        # Apply attention weights per graph
-        num_nodes = x.size(0)
-        if batch is None:
-            # If there's only one graph
-            x_pooled = (x * attn_weights).sum(dim=0, keepdim=True)
+        if self.use_custom_impl:
+            # Custom implementation for GCN
+            from torch_geometric.nn import global_mean_pool
+            
+            x, edge_index, batch = data.x, data.edge_index, data.batch
+            
+            # Apply GCN layers
+            for i, conv in enumerate(self.convs):
+                x = conv(x, edge_index)
+                x = self.batch_norms[i](x)
+                x = self.act_fn(x)
+                x = self.dropout(x)
+            
+            # Global pooling
+            x = global_mean_pool(x, batch)
         else:
-            # If there are multiple graphs in a batch
-            x_pooled = global_add_pool(x * attn_weights, batch)
+            # High-level wrappers for other models
+            x = self.gnn(data.x, data.edge_index, data.batch)
+            
+            # Apply pooling if needed
+            if x.size(0) != data.num_graphs:
+                from torch_geometric.nn import global_mean_pool
+                x = global_mean_pool(x, data.batch)
         
-        # FC layers with residual connection
-        x = self.fc1(x_pooled)
-        x = F.elu(x)
-        x = self.dropout(x)
-        
-        out = self.fc2(x)
-        return out
-#%% Training Function for Single Target
-def train_model(target_idx, target_name):
-    kf = KFold(n_splits=5, shuffle=True, random_state=42)
-    fold = 1
-    all_fold_preds = []
-    all_fold_trues = []
+        # Final projection
+        return self.head(x)  # [batch_size, out_channels]
 
-    for train_idx, val_idx in kf.split(graphs):
-        train_graphs = [graphs[i] for i in train_idx]
-        val_graphs = [graphs[i] for i in val_idx]
-        train_loader = DataLoader(train_graphs, batch_size=16, shuffle=True)
-        val_loader = DataLoader(val_graphs, batch_size=16, shuffle=False)
-        
-        # model = PaperGCNModel(
-        #     in_channels=1,
-        #     hidden_channels=64,
-        #     fc_hidden_dims=[128, 64, 32, 16],
-        #     out_channels=1
-        # ).to(device)
-        
-        # model = ImprovedGATModel(
-        #     in_channels=1,
-        #     hidden_channels=64,
-        #     out_channels=1,
-        #     heads=4,
-        #     dropout=0.6
-        # ).to(device)
-        
+
+#%% Training Function
+def train_model(target_idx, target_name,
+                model_name='GIN',
+                hidden_channels=64,
+                num_layers=3,
+                dropout=0.3,
+                jk=None,
+                **kwargs):
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    all_preds, all_trues = [], []
+
+    # Check the structure of a single graph's y
+    print(f"Single graph y shape: {graphs[0].y.shape}, dtype: {graphs[0].y.dtype}")
+    print(f"First few y values: {graphs[0].y}")
+
+    for fold, (tr, va) in enumerate(kf.split(graphs), 1):
+        tr_loader = DataLoader([graphs[i] for i in tr], batch_size=16, shuffle=True)
+        va_loader = DataLoader([graphs[i] for i in va], batch_size=16)
+
+        # Get the first batch to inspect
+        for debug_batch in tr_loader:
+            print(f"Batch y shape: {debug_batch.y.shape}, dtype: {debug_batch.y.dtype}")
+            print(f"Batch size: {debug_batch.num_graphs}")
+            if len(debug_batch.y.shape) == 1:
+                print("Y is 1D tensor - needs to be reshaped")
+            else:
+                print("Y is already in expected shape")
+            # Only checking the first batch
+            break
+
         model = BuiltinGNN(
-            model_name='GCN',
+            model_name=model_name,
             in_channels=1,
-            hidden_channels=64,
-            num_layers=3,
+            hidden_channels=hidden_channels,
+            num_layers=num_layers,
             out_channels=1,
-            dropout=0.3,
+            dropout=dropout,
             act='relu',
-            jk='cat',
-            # for PNA you might pass:
-            # aggregators=['mean','max','sum','min'],
-            # scalers=['identity','amplification','attenuation'],
-            # edge_dim=...,
-        )
-        
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
-        loss_fn = nn.MSELoss()
-        
+            jk=jk,
+            **kwargs
+        ).to(device)
+
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+        loss_fn   = nn.MSELoss()
+
         for epoch in range(1, 301):
             model.train()
             total_loss = 0
-            for batch in train_loader:
+            for batch in tr_loader:
                 batch = batch.to(device)
                 optimizer.zero_grad()
-                pred = model(batch)
-                target = batch.y[:, target_idx:target_idx+1]
+                pred = model(batch)  # [B,1]
+                
+                # Get the target values properly - this is the core fix
+                if len(batch.y.shape) == 1:
+                    # Shape is flattened to [B*2]
+                    batch_size = batch.num_graphs
+                    if batch.y.size(0) == batch_size * 2:
+                        # Extract every other element starting from target_idx
+                        target = batch.y[target_idx::2].unsqueeze(-1)  # [B,1]
+                    else:
+                        # Alternative approach if the above doesn't work
+                        batch_y_reshaped = batch.y.view(batch_size, -1)
+                        target = batch_y_reshaped[:, target_idx].unsqueeze(-1)
+                else:
+                    # Already in expected [B,2] format
+                    target = batch.y[:, target_idx].unsqueeze(-1)
+
                 loss = loss_fn(pred, target)
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item() * batch.num_graphs
-            if epoch % 20 == 0:
-                print(f"{target_name} - Fold {fold} Epoch {epoch:03d} | Train Loss: {total_loss/len(train_graphs):.4f}")
-        
+            
+            if epoch % 50 == 0:
+                print(f"{target_name} [{model_name}] Fold {fold} Epoch {epoch} Train MSE: {total_loss/len(tr_loader.dataset):.4f}")
+
         model.eval()
-        fold_preds = []
-        fold_trues = []
+        preds, trues = [], []
         with torch.no_grad():
-            for batch in val_loader:
+            for batch in va_loader:
                 batch = batch.to(device)
-                pred = model(batch)
-                target = batch.y[:, target_idx:target_idx+1]
-                fold_preds.append(pred.cpu().numpy())
-                fold_trues.append(target.cpu().numpy())
-        fold_preds = np.vstack(fold_preds)
-        fold_trues = np.vstack(fold_trues)
-        all_fold_preds.append(fold_preds)
-        all_fold_trues.append(fold_trues)
-        print(f"{target_name} - Fold {fold} completed. Validation samples: {fold_preds.shape[0]}")
-        fold += 1
+                p = model(batch)
+                
+                # Same logic as in training loop
+                if len(batch.y.shape) == 1:
+                    batch_size = batch.num_graphs
+                    if batch.y.size(0) == batch_size * 2:
+                        t = batch.y[target_idx::2].unsqueeze(-1)
+                    else:
+                        batch_y_reshaped = batch.y.view(batch_size, -1)
+                        t = batch_y_reshaped[:, target_idx].unsqueeze(-1)
+                else:
+                    t = batch.y[:, target_idx].unsqueeze(-1)
+                
+                preds.append(p.cpu().numpy())
+                trues.append(t.cpu().numpy())
+        
+        all_preds.append(np.vstack(preds))
+        all_trues.append(np.vstack(trues))
+        print(f"{target_name} [{model_name}] Fold {fold} done.")
 
-    all_preds = np.vstack(all_fold_preds)
-    all_trues = np.vstack(all_fold_trues)
-
+    all_preds = np.vstack(all_preds)
+    all_trues = np.vstack(all_trues)
     mse = mean_squared_error(all_trues, all_preds)
-    r2 = r2_score(all_trues, all_preds)
-    print(f"\n{target_name} Results:")
-    print(f"Overall CV MSE: {mse:.4f}")
-    print(f"Overall CV R^2: {r2:.3f}")
+    r2  = r2_score(all_trues, all_preds)
+    print(f"\n{target_name} [{model_name}] CV MSE: {mse:.4f}, R^2: {r2:.3f}")
 
     plt.figure(figsize=(6,5))
-    plt.scatter(all_trues, all_preds, alpha=0.7, color='blue', edgecolors='k')
-    min_val = min(all_trues.min(), all_preds.min())
-    max_val = max(all_trues.max(), all_preds.max())
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal fit')
+    plt.scatter(all_trues, all_preds, alpha=0.7)
+    mn, mx = all_trues.min(), all_trues.max()
+    plt.plot([mn,mx], [mn,mx], 'r--')
     plt.xlabel(f"Actual {target_name}")
     plt.ylabel(f"Predicted {target_name}")
-    plt.title(f"Predicted vs Actual: {target_name}")
-    plt.legend()
+    plt.title(f"{target_name} [{model_name}] Pred vs Actual")
     plt.tight_layout()
     plt.show()
 
     return all_preds, all_trues, mse, r2
 
-#%% Train Separate Models for ACE-km and H2-km
-print("Training ACE-km Model...")
-ace_preds, ace_trues, ace_mse, ace_r2 = train_model(0, "ACE-km")
 
-print("\nTraining H2-km Model...")
-h2_preds, h2_trues, h2_mse, h2_r2 = train_model(1, "H2-km") 
+#%% Train Separate Models
+print("=== Training ACE-km ===")
+
+# For PNA model, we need to calculate the degree histogram
+if 'PNA' in ['PNA', 'pna']:
+    # Compute in-degree histogram over training data
+    from torch_geometric.utils import degree
+    deg = torch.zeros(100, dtype=torch.long)
+    for data in graphs:
+        d = degree(data.edge_index[1], num_nodes=data.num_nodes, dtype=torch.long)
+        deg += torch.bincount(d, minlength=deg.numel())
+
+ace_preds, ace_trues, ace_mse, ace_r2 = train_model(
+    target_idx=0,
+    target_name="ACE-km",
+    model_name='PNA',
+    hidden_channels=128,  # Increased from 64
+    num_layers=8,         # Increased from 3
+    dropout=0.2,          # Decreased from 0.6
+    # jk='cat',
+    # heads=8   # extra arg for GAT
+    # Required PNA parameters
+    aggregators=['mean', 'min', 'max', 'std'],
+    scalers=['identity', 'amplification', 'attenuation'],
+    deg=deg
+)
+
+print("\n=== Training H2-km ===")
+h2_preds, h2_trues, h2_mse, h2_r2 = train_model(
+    target_idx=1,
+    target_name="H2-km",
+    model_name='PNA',
+    hidden_channels=128,  # Increased from 64
+    num_layers=8,         # Increased from 3
+    dropout=0.2,          # Decreased from 0.6
+    # jk='cat',
+    # heads=8   # extra arg for GAT
+    # Required PNA parameters
+    aggregators=['mean', 'min', 'max', 'std'],
+    scalers=['identity', 'amplification', 'attenuation'],
+    deg=deg
+)
+
 # %%
-
-
-# 
